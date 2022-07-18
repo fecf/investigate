@@ -8,29 +8,28 @@
 
 namespace pescan {
 
-using byte = std::byte;
+using byte = std::uint8_t;
 
 class PEImage {
  public:
-  PEImage(const std::string& command_line,
-          const std::string& working_directory);
-  PEImage(HANDLE hProcess, HMODULE hModule);
-  PEImage(const void* data, uint64_t size);
+  PEImage();
+  PEImage(HANDLE hProcess);
   PEImage(const char* filepath);
   ~PEImage();
 
-  void init(byte* data, uint64_t size);
+  void init(const void* data, size_t size);
+
   byte* data() const;
   size_t size() const;
-  byte* image_base() const;
+  size_t base() const;
 
   byte* find(const std::vector<byte>& pattern,
-             const std::vector<bool>& wildcard = {},
+             const std::vector<byte>& wildcard = {},
              size_t offset = 0,
              size_t limit = 0,
              bool up = false) const;
   std::vector<byte*> find_all(const std::vector<byte>& pattern,
-                              const std::vector<bool>& wildcard = {},
+                              const std::vector<byte>& wildcard = {},
                               size_t offset = 0,
                               size_t limit = 0,
                               bool up = false) const;
@@ -39,8 +38,7 @@ class PEImage {
   std::vector<byte> buffer_;
   byte* data_;
   size_t size_;
-
-  byte* image_base_;
+  size_t base_;
 };
 
 }  // namespace investigate

@@ -7,108 +7,108 @@
 #include <winternl.h>
 
 #pragma comment(lib, "ntdll.lib")
+#pragma comment(lib, "psapi.lib")
 
 namespace pescan {
 
-PEImage::PEImage(const std::string& command_line,
-                 const std::string& working_directory) {
-  STARTUPINFOA si{};
-  si.cb = sizeof(si);
-  PROCESS_INFORMATION pi{};
+PEImage::PEImage() { 
+  HMODULE hModule = ::GetModuleHandle(NULL); 
 
-  DWORD ret;
-  ret = ::CreateProcessA(NULL, (char*)command_line.c_str(), NULL, NULL, FALSE,
-                         0, 0, working_directory.c_str(), &si, &pi);
+  BOOL ret;
+  MODULEINFO modinfo{};
+  ret = ::GetModuleInformation(::GetCurrentProcess(), hModule, &modinfo, sizeof(modinfo));
   assert(ret != 0);
 
-  ret = ::WaitForInputIdle(pi.hProcess, 5000);
-  assert(ret == 0);
+  buffer_.resize(modinfo.SizeOfImage);
+  ::memcpy(buffer_.data(), hModule, buffer_.size());
 
-  PROCESS_BASIC_INFORMATION pbi{};
-  ULONG return_length;
-  NTSTATUS status = ::NtQueryInformationProcess(
-      pi.hProcess, ProcessBasicInformation, &pbi, sizeof(pbi), &return_length);
-  assert(status == 0);
-
-  DWORD_PTR peb_offset = (DWORD_PTR)pbi.PebBaseAddress + 0x10;
-  LPVOID image_base;
-  ret = ::ReadProcessMemory(pi.hProcess, (LPVOID)peb_offset, &image_base, 16,
-                            NULL);
-  assert(ret == TRUE);
-
-  BYTE headers[4096]{};
-  ret = ::ReadProcessMemory(pi.hProcess, image_base, headers, 4096, NULL);
-  assert(ret == TRUE);
-
-  PIMAGE_NT_HEADERS32 nt_header = (PIMAGE_NT_HEADERS32)headers;
-
-  data_ =
-      reinterpret_cast<byte*>((uint64_t)nt_header->OptionalHeader.ImageBase);
-  size_ = nt_header->OptionalHeader.SizeOfImage;
-  init(data_, size_);
+  init(buffer_.data(), buffer_.size());
 }
 
-PEImage::PEImage(HANDLE hProcess, HMODULE hModule) {
+PEImage::PEImage(HANDLE process) {
+  ::WaitForInputIdle(process, INFINITE);
+
+  DWORD process_id = ::GetProcessId(process);
+  HANDLE handle = ::OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+                                FALSE, process_id);
+  assert(handle != NULL);
+
+  BOOL ret;
+
+  HMODULE mods[1024]{};
+  DWORD needed;
+  ret = ::EnumProcessModules(handle, mods, sizeof(mods), &needed);
+  assert(ret == TRUE);
+
   MODULEINFO modinfo{};
-  BOOL ret =
-      ::GetModuleInformation(hProcess, hModule, &modinfo, sizeof(modinfo));
-  assert(ret == TRUE);
+  ret = ::GetModuleInformation(handle, mods[0], &modinfo, sizeof(modinfo));
+  assert(ret != 0);
 
-  data_ = (byte*)modinfo.EntryPoint;
-  size_ = modinfo.SizeOfImage;
-  init(data_, size_);
-}
+  DWORD size = modinfo.SizeOfImage;
+  buffer_.resize(modinfo.SizeOfImage);
+  ret = ::ReadProcessMemory(handle, modinfo.lpBaseOfDll, buffer_.data(), 2, NULL);
+  assert(ret != 0);
+  assert(buffer_[0] == 'M' && buffer_[1] == 'Z');
 
-PEImage::PEImage(const void* data, uint64_t size) {
-  data_ = (byte*)data;
-  size_ = size;
-  init(data_, size_);
+  ret = ::ReadProcessMemory(handle, mods[0], buffer_.data(), size, NULL);
+  assert(ret != 0);
+
+  ::CloseHandle(handle);
+
+  init(buffer_.data(), buffer_.size());
 }
 
 PEImage::PEImage(const char* filepath) {
   std::ifstream ifs(filepath, std::ios::binary);
-  buffer_ = std::vector<byte>(ifs.seekg(0, std::ios::end).tellg());
+  buffer_ = std::vector<byte>((unsigned int)ifs.seekg(0, std::ios::end).tellg());
   ifs.seekg(0, std::ios::beg).read((char*)buffer_.data(), buffer_.size());
+
+  init(buffer_.data(), buffer_.size());
+}
+
+void PEImage::init(const void* data, size_t size) {
+  assert(size > 2);
+  assert(((byte*)data)[0] == 'M' && ((byte*)data)[1] == 'Z');
+  PIMAGE_DOS_HEADER dos_header = (PIMAGE_DOS_HEADER)data;
+  PIMAGE_NT_HEADERS nt_headers = (PIMAGE_NT_HEADERS)((uint8_t*)data + dos_header->e_lfanew);
+  data_ = (byte*)data;
+  size_ = size;
+  base_ = nt_headers->OptionalHeader.ImageBase;
 }
 
 PEImage::~PEImage() {}
-
-void PEImage::init(byte* data, uint64_t size) {
-  PIMAGE_DOS_HEADER dos_header = (PIMAGE_DOS_HEADER)data;
-  PIMAGE_NT_HEADERS nt_headers =
-      (PIMAGE_NT_HEADERS)((uint8_t*)data + dos_header->e_lfanew);
-  image_base_ = data_ + (nt_headers->OptionalHeader.ImageBase >> 32);
-}
 
 byte* PEImage::data() const {
   return data_;
 }
 
-uint64_t PEImage::size() const {
+size_t PEImage::size() const {
   return size_;
 }
 
-byte* PEImage::image_base() const {
-  return image_base_;
+size_t PEImage::base() const {
+  return base_;
 }
 
 byte* PEImage::find(const std::vector<byte>& pattern,
-                    const std::vector<bool>& wildcard,
+                    const std::vector<byte>& wildcard,
                     size_t offset,
                     size_t limit,
                     bool up) const {
   assert(offset <= size_);
 
   if (limit == 0) {
-    limit = !up ? (size_ - offset) : offset;
+    limit = up ? offset : (size_ - offset);
   }
 
-  size_t pos = offset;
-  for (size_t pos = offset, seq = 0; seq < limit;
-       seq++, (!up ? pos++ : pos--)) {
+  const byte* pattern_ptr = pattern.data();
+  const byte* wildcard_ptr = wildcard.data();
+
+  long pos = offset;
+  for (long pos = offset, seq = 0; seq < limit; seq++, (!up ? pos++ : pos--)) {
     bool matched = true;
     for (size_t i = 0; i < pattern.size(); ++i) {
-      if (i < wildcard.size() && wildcard[i]) {
+      if (i < wildcard.size() && wildcard_ptr[i] != 0x00) {
         continue;
       }
 
@@ -126,7 +126,7 @@ byte* PEImage::find(const std::vector<byte>& pattern,
 }
 
 std::vector<byte*> PEImage::find_all(const std::vector<byte>& pattern,
-                                     const std::vector<bool>& wildcard,
+                                     const std::vector<byte>& wildcard,
                                      size_t offset,
                                      size_t limit,
                                      bool up) const {

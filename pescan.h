@@ -1,9 +1,9 @@
 #pragma once
 
 #include <cstddef>
+#include <span>
 #include <string>
 #include <vector>
-#include <span>
 
 #include "image.h"
 
@@ -22,7 +22,10 @@ class Cursor {
   size_t offset() const;
   size_t size() const;
 
-  template <typename T> T as() const { return *((T*)(start_)); }
+  template <typename T>
+  T as() const {
+    return *((T*)(start_));
+  }
   uint32_t as_call_to() const {
     size_t base = offset();
     int32_t offset = *(int32_t*)(start_ + 1);
@@ -50,7 +53,7 @@ class PatternFinder {
   Cursor last() const;
 
  private:
-  std::pair<std::vector<byte>, std::vector<bool>> decode(
+  std::pair<std::vector<byte>, std::vector<byte>> decode(
       const std::string& string);
 
  private:
@@ -58,4 +61,4 @@ class PatternFinder {
   std::vector<std::span<byte>> elements_;
 };
 
-}  // namespace investigate
+}  // namespace pescan
